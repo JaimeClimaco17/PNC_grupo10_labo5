@@ -1,0 +1,78 @@
+name: CI - students-app
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: code-checkout
+        uses: actions/checkout@v4
+
+      - name: JDK-configuration
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build + Tests
+        run: ./mvnw clean verify -B
+
+      - name: publish tests reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: target/surefire-reports/
+
+  smoke-test-compose:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: code-checkout
+        uses: actions/checkout@v4
+
+      - name: Create test .env
+        run: |
+          echo "DATABASE_NAME=studentsdb_ci" > .env
+          echo "DATABASE_USERNAME=ci_user" >> .env
+          echo "DATABASE_PASSWORD=ci_password" >> .env
+          echo "DATABASE_URL=jdbc:postgresql://localhost:5433/studentsdb_ci" >> .env
+          echo "SPRING_JPA_SHOW_SQL=false" >> .env
+          echo "SPRING_JPA_HIBERNATE_DDL=update" >> .env
+          echo "SPRING_JPA_HIBERNATE_DIALECT=org.hibernate.dialect.PostgreSQLDialect" >> .env
+          echo "SPRING_APPLICATION_NAME=students-app-test" >> .env
+
+      - name: docker-compose-up
+        run: docker compose up --build -d
+
+      - name: wait-response
+        run: |
+          echo "Waiting 15s for containers to initialize..."
+          sleep 15
+          for i in $(seq 1 20); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/students || echo "000")
+            echo "Attempt $i/20 - HTTP status: $STATUS"
+            if [ "$STATUS" != "000" ] && [ "$STATUS" != "" ]; then
+              echo "App responded! Status: $STATUS"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The app never responded on time"
+          exit 1
+
+      - name: show-logs
+        if: failure()
+        run: docker compose logs
+
+      - name: shutdown
+        if: always()
+        run: docker compose down -v
